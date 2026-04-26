@@ -44,6 +44,7 @@ Semi-Lagrangian Vlasov-Poisson solver
 """
 
 import numpy as np
+import matplotlib.pyplot as plt
 from scipy.special import wofz
 from scipy.interpolate import CubicSpline
 
@@ -453,3 +454,199 @@ def run_vlasov(f0, x, v, dt, n_steps, record_every=1):
         f = advect_x(f, v, dt / 2.0, x)
 
     return f, np.array(t_hist), np.array(emax_hist)
+
+def plot_phase_space(f, x, v, title="Electron Phase Space", v_frame=0.0):
+    """
+    Plots the electron phase space distribution.
+    
+    Parameters
+    ----------
+    f       : ndarray (Nx, Nv)  distribution function
+    x       : 1-D array         spatial grid
+    v       : 1-D array         velocity grid
+    v_frame : float             velocity of the observation frame (default 0.0). 
+                                Set to EH speed to see the co-moving frame.
+    """
+    X, V = np.meshgrid(x, v - v_frame, indexing='ij')
+    
+    plt.figure(figsize=(10, 5))
+    # Transpose f for plotting so x is horizontal and v is vertical
+    cmap_plot = plt.pcolormesh(X, V, f, shading='auto', cmap='jet')
+    plt.colorbar(cmap_plot, label='Distribution Function')
+    plt.title(title)
+    plt.xlabel("Spatial direction (x)")
+    plt.ylabel("Velocity ($v - v_{frame}$)")
+    plt.tight_layout()
+    plt.show()
+
+def plot_potential_and_field(phi, E, x, title="Snapshot"):
+    """
+    Plots the electrostatic potential and electric field profiles.
+    
+    Parameters
+    ----------
+    phi : 1-D array (Nx,)  electrostatic potential
+    E   : 1-D array (Nx,)  electric field
+    x   : 1-D array        spatial grid
+    """
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+    
+    ax1.plot(x, phi, 'k-', linewidth=2)
+    ax1.set_ylabel(r"Electric Potential ($\phi$)")
+    ax1.set_title(title)
+    ax1.grid(True, linestyle='--', alpha=0.6)
+    
+    ax2.plot(x, E, 'k-', linewidth=2)
+    ax2.set_ylabel(r"Electric Field ($E_x$)")
+    ax2.set_xlabel("Spatial direction (x)")
+    ax2.grid(True, linestyle='--', alpha=0.6)
+    
+    plt.tight_layout()
+    plt.show()
+
+
+# ---------------------------------------------------------------------------
+# Moving Electron Hole Initializations 
+# ---------------------------------------------------------------------------
+
+def create_moving_hole(x, v, phi_amp, L, M, cs, x0, beta=-0.5, vth=428.5, Te_ratio=100.0):
+    """
+    Creates a generalized moving electron hole based on the paper's exact energy parameters.
+    """
+    v_EH = M * cs  
+    X, V = np.meshgrid(x, v, indexing='ij')
+    
+    # 1. Potential Profile
+    phi = phi_amp * (1.0 / np.cosh((X - x0) / L))**2
+    
+    # 2. Shifted velocities and energies (normalized to electron temperature)
+    V_prime = V - v_EH
+    eps_K_prime = 0.5 * (V_prime / vth)**2
+    eps_phi = phi / Te_ratio  
+    
+    # 3. Free Particles (Shifted back to lab frame for the unperturbed Maxwellian)
+    # Using energy conservation: v_sh_prime = sign(V') * sqrt(2 * (eps_K' - eps_phi)) * vth
+    v_sh_prime = np.sign(V_prime) * vth * np.sqrt(np.maximum(eps_K_prime - eps_phi, 0.0) * 2.0)
+    v_sh_lab = v_sh_prime + v_EH
+    
+    norm = np.sqrt(2.0 * np.pi) * vth
+    f_free = np.exp(-0.5 * (v_sh_lab / vth)**2) / norm
+    
+    # 4. Trapped Particles (Continuous at the separatrix eps_K' == eps_phi)
+    # At separatrix, v_sh_prime = 0, so v_sh_lab = v_EH.
+    f_base = np.exp(-0.5 * (v_EH / vth)**2) / norm
+    f_trap = f_base * np.exp(-beta * eps_K_prime)
+    
+    # 5. Composite Phase Space
+    f_hole = np.where(eps_K_prime < eps_phi, f_trap, f_free)
+    return f_hole, phi
+
+def setup_head_on_collision(x, v, cs=17.43, vth=428.5):
+    """
+    Sets up the initial distribution for a head-on collision between EH1 and EH2.
+    """
+    # Create EH1 moving right
+    f1, phi1 = create_moving_hole(x, v, phi_amp=19.0, L=22.5, M=40, cs=cs, x0=350, vth=vth)
+    
+    # Create EH2 moving left
+    f2, phi2 = create_moving_hole(x, v, phi_amp=9.5, L=22.5, M=-40, cs=cs, x0=800, vth=vth)
+    
+    # Background Maxwellian distribution scaled by correct vth
+    X, V = np.meshgrid(x, v, indexing='ij')
+    f_bg = np.exp(-0.5 * (V / vth)**2) / (np.sqrt(2.0 * np.pi) * vth)
+    
+    # Superimpose
+    f_total = f1 + f2 - f_bg
+    phi_total = phi1 + phi2 
+    
+    return f_total, phi_total
+
+
+def setup_overtaking_collision(x, v, cs=17.43, vth=428.5):
+    """
+    Sets up the initial distribution for an overtaking collision between EH1 and EH3.
+    """
+    # Create EH1 moving right (faster)
+    f1, phi1 = create_moving_hole(x, v, phi_amp=19.0, L=22.5, M=40, cs=cs, x0=250, vth=vth)
+    
+    # Create EH3 moving right (slower)
+    f3, phi3 = create_moving_hole(x, v, phi_amp=19.0, L=22.5, M=30, cs=cs, x0=450, vth=vth)
+    
+    # Background Maxwellian distribution scaled by correct vth
+    X, V = np.meshgrid(x, v, indexing='ij')
+    f_bg = np.exp(-0.5 * (V / vth)**2) / (np.sqrt(2.0 * np.pi) * vth)
+    
+    f_total = f1 + f3 - f_bg
+    phi_total = phi1 + phi3
+    
+    return f_total, phi_total
+
+def _visualizer_maxwellian(v, amplitude, drift, thermal_spread):
+    """Internal helper to calculate a 1D Maxwellian for the visualizer."""
+    return (amplitude / (np.sqrt(2 * np.pi) * thermal_spread)) * \
+           np.exp(-0.5 * ((v - drift) / thermal_spread)**2)
+
+def plot_instability_grid(mode='bump'):
+    """
+    Plots a 2x2 grid showing the evolution of the velocity distribution
+    and the unstable positive-slope regions for different drift velocities.
+    """
+    v = np.linspace(-8, 8, 1000)
+    
+    # Setup a 2x2 figure
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8), dpi=100)
+    mode_title = "Bump-on-Tail" if mode == 'bump' else "Two-Stream"
+    fig.suptitle(f'Evolution of {mode_title} Instability', fontsize=16, y=0.95)
+    
+    # Define the parameter sweep for Drift Velocity (u_b)
+    if mode == 'bump':
+        drift_vals = [2.0, 3.0, 4.0, 5.0]
+        density, spread = 0.15, 0.5
+    else: 
+        # Two-stream requires slightly lower drift velocities to see the merge
+        drift_vals = [1.0, 2.0, 3.0, 4.0]
+        density, spread = 0.5, 0.5 # Density is fixed 50/50 for two-stream
+
+    # Flatten the 2x2 axes array for easy iteration
+    axes = axes.flatten()
+    
+    for i, ax in enumerate(axes):
+        drift = drift_vals[i]
+        
+        # Calculate f(v)
+        if mode == 'bump':
+            f = _visualizer_maxwellian(v, 1.0 - density, 0.0, 1.0) + \
+                _visualizer_maxwellian(v, density, drift, spread)
+        else:
+            f = _visualizer_maxwellian(v, 0.5, drift, spread) + \
+                _visualizer_maxwellian(v, 0.5, -drift, spread)
+            
+        # Calculate derivative and find unstable regions
+        dfdv = np.gradient(f, v)
+        if mode == 'bump':
+            unstable_mask = (v > 0.2) & (dfdv > 0.001)
+        else:
+            unstable_mask = ((v > 0.2) & (dfdv > 0.001)) | ((v < -0.2) & (dfdv < -0.001))
+            
+        # Plotting
+        ax.plot(v, f, color='#0056b3', linewidth=2)
+        ax.fill_between(v, f, 0, where=unstable_mask, color='red', alpha=0.3, 
+                        label='Unstable ($v \\cdot \\partial f/\\partial v > 0$)')
+        
+        # Formatting
+        ax.set_title(f'Drift Velocity $u_b$ = {drift}', fontsize=12)
+        ax.set_xlim(-8, 8)
+        ax.set_ylim(0, 0.5)
+        ax.grid(True, alpha=0.3)
+        
+        # Only add labels to the outer edges to keep it clean
+        if i >= 2:
+            ax.set_xlabel('Velocity ($v / v_{th}$)', fontsize=11)
+        if i % 2 == 0:
+            ax.set_ylabel('Distribution $f(v)$', fontsize=11)
+            
+        if i == 0:
+            ax.legend(loc='upper right', fontsize=9)
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.93]) # Adjust layout to fit the suptitle
+    plt.show()
